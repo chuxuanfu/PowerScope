@@ -1,0 +1,25 @@
+# Local deliverables, research, and test exports
+/outputs/
+/work/
+
+# Build artifacts
+.build/
+DerivedData/
+*.app/
+*.dSYM/
+*.zip
+
+# Runtime records and local environment
+state.json
+*.csv
+*.log
+.env
+.env.*
+!.env.example
+
+# macOS / editors
+.DS_Store
+xcuserdata/
+*.xcuserstate
+.idea/
+.vscode/
