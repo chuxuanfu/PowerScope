@@ -11,7 +11,8 @@ struct SensorReading: Sendable {
 
 struct NativeSnapshot: Sendable {
     var timestamp: Date
-    var systemWatts: Double?
+    var smcSystemWatts: Double?
+    var telemetrySystemWatts: Double?
     var adapterWatts: Double?
     /// Positive means charging; negative means discharging.
     var batteryWatts: Double?
@@ -39,12 +40,13 @@ final class NativeSensors: @unchecked Sendable {
         let telemetry = battery?["PowerTelemetryData"] as? [String: Any]
         let external = (battery?["ExternalConnected"] as? NSNumber)?.boolValue ?? false
         let charging = (battery?["IsCharging"] as? NSNumber)?.boolValue ?? false
-        let system = milliwatts(telemetry?["SystemLoad"])
+        let telemetrySystem = milliwatts(telemetry?["SystemLoad"])
+        let smcSystem = smc?.power("PSTR").flatMap { $0 > 0 ? $0 : nil }
         let adapter = milliwatts(telemetry?["SystemPowerIn"])
         var batteryPower = milliwatts(telemetry?["BatteryPower"], signed: true)
         var notes = [String]()
         if battery == nil { notes.append("未能读取 AppleSmartBattery；此设备可能没有电池或不开放此接口。") }
-        if system == nil { notes.append("当前未取得有效的整机 SystemLoad 读数；不会用芯片功耗代替整机功耗。") }
+        if smcSystem == nil && telemetrySystem == nil { notes.append("当前未取得有效的整机功率读数。") }
         if batteryPower == nil, let voltage = number(battery?["Voltage"]),
            let current = signedNumber(battery?["InstantAmperage"] ?? battery?["Amperage"]),
            voltage > 0, voltage < 100_000 {
@@ -57,10 +59,6 @@ final class NativeSensors: @unchecked Sendable {
             if value.isFinite, (0...100).contains(value) { percent = value }
         }
         var readings = [SensorReading]()
-        if let value = smc?.power("PSTR") {
-            readings.append(SensorReading(key: "smc_system", name: "整机 SMC 传感器", watts: value,
-                                          source: "AppleSMC PSTR · W；与 SystemLoad 独立采样，不能相加"))
-        }
         if let value = smc?.power("PDTR") {
             readings.append(SensorReading(key: "smc_adapter", name: "输入 SMC 传感器", watts: value,
                                           source: "AppleSMC PDTR · W；Mac 侧直流输入，非插座功率"))
@@ -92,7 +90,7 @@ final class NativeSensors: @unchecked Sendable {
             notes.append("IOReport 能量接口不可用；CPU、GPU、ANE 分项不会伪装为零。")
         }
         if smc == nil { notes.append("SMC 只读连接不可用，未提供背光及其他 SMC 读数。") }
-        return NativeSnapshot(timestamp: now, systemWatts: system, adapterWatts: adapter,
+        return NativeSnapshot(timestamp: now, smcSystemWatts: smcSystem, telemetrySystemWatts: telemetrySystem, adapterWatts: adapter,
                               batteryWatts: batteryPower, batteryPercent: percent,
                               externalConnected: external, isCharging: charging,
                               sensorReadings: readings, notes: notes,

@@ -284,7 +284,7 @@ struct DashboardView: View {
                 Text("等待首次读取")
             }
             if let age = model.firmwareAgeSeconds, age > 20 {
-                Text("·  传感器数据约 \(Int(age)) 秒前")
+                Text("·  电池遥测约 \(Int(age)) 秒前")
                     .foregroundStyle(ScopeStyle.amber)
             }
         }

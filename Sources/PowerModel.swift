@@ -115,6 +115,7 @@ final class PowerModel: ObservableObject {
     var externalConnected: Bool { latest?.externalConnected ?? false }
     var isCharging: Bool { latest?.isCharging ?? false }
     var firmwareAgeSeconds: Double? { firmwareUpdated.map { max(0, Date().timeIntervalSince($0)) } }
+    private var batteryTelemetryIsStale: Bool { !isPaused && (firmwareAgeSeconds ?? 0) > 120 }
     var sensorNotes: [String] {
         var notes = latest?.notes ?? []
         notes.append("整机读数包含内置屏幕等机内负载，不含外部电源适配器损耗及独立供电显示器。")
@@ -175,10 +176,10 @@ final class PowerModel: ObservableObject {
 
     func value(_ metric: MetricID) -> Double? {
         guard let snapshot = latest else { return nil }
-        if !isPaused, (firmwareAgeSeconds ?? 0) > 120,
-           [.system, .adapter, .batteryDischarge, .batteryCharge].contains(metric) { return nil }
+        if metric == .system, let watts = snapshot.smcSystemWatts { return watts }
+        if batteryTelemetryIsStale, [.system, .adapter, .batteryDischarge, .batteryCharge].contains(metric) { return nil }
         switch metric {
-        case .system: return snapshot.systemWatts
+        case .system: return snapshot.telemetrySystemWatts
         case .adapter: return snapshot.adapterWatts
         case .batteryDischarge: return snapshot.batteryWatts.map { max(0, -$0) }
         case .batteryCharge: return snapshot.batteryWatts.map { max(0, $0) }
@@ -188,7 +189,9 @@ final class PowerModel: ObservableObject {
 
     func source(_ metric: MetricID) -> String {
         switch metric {
-        case .system: return "电源遥测 · SystemLoad"
+        case .system:
+            if latest?.smcSystemWatts != nil { return "AppleSMC · PSTR" }
+            return value(.system) == nil ? "整机功率暂不可用" : "电池遥测 · SystemLoad（备用）"
         case .adapter: return "电源遥测 · SystemPowerIn"
         case .batteryDischarge, .batteryCharge: return "电源遥测 · BatteryPower"
         default: return latest?.sensorReadings.first { $0.key == metric.rawValue }?.source ?? "此设备未提供可用的独立读数"
@@ -229,7 +232,7 @@ final class PowerModel: ObservableObject {
         let now = snapshot.timestamp
         latest = snapshot
         lastUpdated = now
-        let fingerprint = "\(snapshot.systemWatts ?? -1)|\(snapshot.adapterWatts ?? -1)|\(snapshot.batteryWatts ?? -1)"
+        let fingerprint = "\(snapshot.telemetrySystemWatts ?? -1)|\(snapshot.adapterWatts ?? -1)|\(snapshot.batteryWatts ?? -1)"
         if let counter = snapshot.firmwareCounter {
             if lastCounter != counter { firmwareUpdated = now }
             lastCounter = counter
@@ -237,23 +240,20 @@ final class PowerModel: ObservableObject {
             firmwareUpdated = now
         }
         lastFingerprint = fingerprint
-        let stale = firmwareUpdated.map { now.timeIntervalSince($0) > 120 } ?? false
-        if snapshot.systemWatts == nil {
+        let stale = batteryTelemetryIsStale
+        let systemWatts = value(.system)
+        if systemWatts == nil {
             statusText = "整机遥测暂不可用"
         } else if stale {
-            statusText = "电源遥测超过 2 分钟未更新"
+            statusText = "整机实时监测中 · 电池遥测暂未更新"
         } else {
             statusText = "实时监测中"
         }
-        if stale {
-            ledger.breakContinuity()
-        } else {
-            ledger.ingest(time: now, system: snapshot.systemWatts, adapter: snapshot.adapterWatts, battery: snapshot.batteryWatts)
-        }
+        ledger.ingest(time: now, system: systemWatts, adapter: value(.adapter), battery: stale ? nil : snapshot.batteryWatts)
         totals = ledger.totals
         var values: [String: Double] = [:]
         for metric in MetricID.allCases {
-            if let v = value(metric), v.isFinite, !stale || ![.system, .adapter, .batteryDischarge, .batteryCharge].contains(metric) {
+            if let v = value(metric), v.isFinite {
                 values[metric.rawValue] = v
             }
         }
