@@ -67,7 +67,8 @@ private struct SavedState: Codable {
     var history: [PowerPoint]
     var visibleMetrics: Set<MetricID>
     var chartMetrics: Set<MetricID>
-    var refreshInterval: Double
+    // Older files store refreshInterval. Start those installations at the new 1 s default.
+    var samplingIntervalSeconds: Double?
     var chartWindow: Double
     var showEnergy: Bool
     var showChart: Bool
@@ -82,7 +83,8 @@ final class PowerModel: ObservableObject {
     @Published var visibleMetrics: Set<MetricID> = [.system, .adapter, .batteryDischarge, .batteryCharge, .chip, .display] { didSet { persist() } }
     @Published var chartMetrics: Set<MetricID> = [.system, .adapter, .batteryDischarge] { didSet { persist() } }
     @Published var isPaused = false
-    @Published var refreshInterval: Double = 5 { didSet { if !loading { restartTimer(); persist() } } }
+    static let samplingIntervals = [1.0, 2.0, 5.0, 10.0]
+    @Published var refreshInterval: Double = 1 { didSet { if !loading { restartTimer(); persist() } } }
     @Published var chartWindow: Double = 15 { didSet { persist() } }
     @Published var showEnergy = true { didSet { persist() } }
     @Published var showChart = true { didSet { persist() } }
@@ -145,7 +147,9 @@ final class PowerModel: ObservableObject {
             history = saved.history.filter { $0.time > Date().addingTimeInterval(-86400) }
             visibleMetrics = saved.visibleMetrics
             chartMetrics = saved.chartMetrics
-            refreshInterval = [2.0, 5.0, 10.0].contains(saved.refreshInterval) ? saved.refreshInterval : 5
+            if let interval = saved.samplingIntervalSeconds, Self.samplingIntervals.contains(interval) {
+                refreshInterval = interval
+            }
             chartWindow = [1.0, 5.0, 15.0, 60.0].contains(saved.chartWindow) ? saved.chartWindow : 15
             showEnergy = saved.showEnergy
             showChart = saved.showChart
@@ -262,10 +266,13 @@ final class PowerModel: ObservableObject {
     private func restartTimer() {
         timer?.invalidate()
         guard !isPaused, !sleeping else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: max(2, refreshInterval), repeats: true) { [weak self] _ in
+        let samplingTimer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshNow() }
         }
-        timer?.tolerance = min(1, refreshInterval * 0.15)
+        samplingTimer.fireDate = Date().addingTimeInterval(refreshInterval)
+        samplingTimer.tolerance = min(1, refreshInterval * 0.05)
+        RunLoop.main.add(samplingTimer, forMode: .common)
+        timer = samplingTimer
     }
 
     func togglePause() {
@@ -298,7 +305,7 @@ final class PowerModel: ObservableObject {
 
     func persist() {
         guard !loading else { return }
-        let saved = SavedState(totals: totals, history: history, visibleMetrics: visibleMetrics, chartMetrics: chartMetrics, refreshInterval: refreshInterval, chartWindow: chartWindow, showEnergy: showEnergy, showChart: showChart, showFlow: showFlow, menuMetric: menuMetric)
+        let saved = SavedState(totals: totals, history: history, visibleMetrics: visibleMetrics, chartMetrics: chartMetrics, samplingIntervalSeconds: refreshInterval, chartWindow: chartWindow, showEnergy: showEnergy, showChart: showChart, showFlow: showFlow, menuMetric: menuMetric)
         do {
             try FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(saved).write(to: stateURL, options: .atomic)

@@ -799,9 +799,9 @@ private struct CustomizationSheet: View {
                                     .font(.system(size: 11))
                                     .foregroundStyle(ScopeStyle.secondary)
                                 Picker("读取间隔", selection: $model.refreshInterval) {
-                                    Text("2 秒").tag(2.0)
-                                    Text("5 秒").tag(5.0)
-                                    Text("10 秒").tag(10.0)
+                                    ForEach(PowerModel.samplingIntervals, id: \.self) { seconds in
+                                        Text("\(Int(seconds)) 秒").tag(seconds)
+                                    }
                                 }
                                 .labelsHidden()
                                 .pickerStyle(.segmented)
