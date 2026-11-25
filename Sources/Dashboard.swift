@@ -813,7 +813,7 @@ private struct CustomizationSheet: View {
                                     .foregroundStyle(ScopeStyle.secondary)
                                 Picker("菜单栏显示", selection: $model.menuMetric) {
                                     ForEach(MetricID.allCases) { metric in
-                                        Text(metric.title).tag(metric)
+                                        Text(metric == .system ? "仅整机功率" : "整机 + \(metric.title)").tag(metric)
                                     }
                                 }
                                 .labelsHidden()

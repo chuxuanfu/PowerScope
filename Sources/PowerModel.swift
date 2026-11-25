@@ -123,9 +123,10 @@ final class PowerModel: ObservableObject {
     }
     var menuTitle: String {
         if isPaused { return "暂停" }
-        guard let watts = value(menuMetric) else { return "— W" }
-        let prefix = menuMetric == .system ? "" : menuMetric.shortTitle + " "
-        return prefix + formatPower(watts) + " W"
+        let systemPower = (value(.system).map(formatPower) ?? "—") + " W"
+        guard menuMetric != .system else { return systemPower }
+        let extraPower = (value(menuMetric).map(formatPower) ?? "—") + " W"
+        return "\(systemPower) · \(menuMetric.shortTitle) \(extraPower)"
     }
 
     init() {

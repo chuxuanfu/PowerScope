@@ -30,7 +30,7 @@ struct PowerScopeApp: App {
         MenuBarExtra {
             MenuContent(model: model)
         } label: {
-            Label(model.menuTitle, systemImage: "bolt.fill")
+            Text(verbatim: model.menuTitle)
         }
         .menuBarExtraStyle(.menu)
     }
