@@ -67,8 +67,6 @@ private struct SavedState: Codable {
     var history: [PowerPoint]
     var visibleMetrics: Set<MetricID>
     var chartMetrics: Set<MetricID>
-    // Older files store refreshInterval. Start those installations at the new 1 s default.
-    var samplingIntervalSeconds: Double?
     var chartWindow: Double
     var showEnergy: Bool
     var showChart: Bool
@@ -83,8 +81,7 @@ final class PowerModel: ObservableObject {
     @Published var visibleMetrics: Set<MetricID> = [.system, .adapter, .batteryDischarge, .batteryCharge, .chip, .display] { didSet { persist() } }
     @Published var chartMetrics: Set<MetricID> = [.system, .adapter, .batteryDischarge] { didSet { persist() } }
     @Published var isPaused = false
-    static let samplingIntervals = [1.0, 2.0, 5.0, 10.0]
-    @Published var refreshInterval: Double = 1 { didSet { if !loading { restartTimer(); persist() } } }
+    private let refreshInterval: TimeInterval = 1
     @Published var chartWindow: Double = 15 { didSet { persist() } }
     @Published var showEnergy = true { didSet { persist() } }
     @Published var showChart = true { didSet { persist() } }
@@ -93,7 +90,6 @@ final class PowerModel: ObservableObject {
     @Published var lastUpdated: Date?
     @Published var statusText = "正在连接电源传感器"
     @Published private var latest: NativeSnapshot?
-    @Published private var firmwareUpdated: Date?
     @Published var storageMessage: String?
 
     private var ledger = EnergyLedger()
@@ -104,8 +100,6 @@ final class PowerModel: ObservableObject {
     private var pending = false
     private var loading = true
     private var sleeping = false
-    private var lastCounter: UInt64?
-    private var lastFingerprint: String?
     private var lastSave = Date.distantPast
     private var readingGeneration = 0
     private let stateURL: URL
@@ -114,8 +108,6 @@ final class PowerModel: ObservableObject {
     var batteryPercent: Double? { latest?.batteryPercent }
     var externalConnected: Bool { latest?.externalConnected ?? false }
     var isCharging: Bool { latest?.isCharging ?? false }
-    var firmwareAgeSeconds: Double? { firmwareUpdated.map { max(0, Date().timeIntervalSince($0)) } }
-    private var batteryTelemetryIsStale: Bool { !isPaused && (firmwareAgeSeconds ?? 0) > 120 }
     var sensorNotes: [String] {
         var notes = latest?.notes ?? []
         notes.append("整机读数包含内置屏幕等机内负载，不含外部电源适配器损耗及独立供电显示器。")
@@ -148,9 +140,6 @@ final class PowerModel: ObservableObject {
             history = saved.history.filter { $0.time > Date().addingTimeInterval(-86400) }
             visibleMetrics = saved.visibleMetrics
             chartMetrics = saved.chartMetrics
-            if let interval = saved.samplingIntervalSeconds, Self.samplingIntervals.contains(interval) {
-                refreshInterval = interval
-            }
             chartWindow = [1.0, 5.0, 15.0, 60.0].contains(saved.chartWindow) ? saved.chartWindow : 15
             showEnergy = saved.showEnergy
             showChart = saved.showChart
@@ -176,10 +165,8 @@ final class PowerModel: ObservableObject {
 
     func value(_ metric: MetricID) -> Double? {
         guard let snapshot = latest else { return nil }
-        if metric == .system, let watts = snapshot.smcSystemWatts { return watts }
-        if batteryTelemetryIsStale, [.system, .adapter, .batteryDischarge, .batteryCharge].contains(metric) { return nil }
         switch metric {
-        case .system: return snapshot.telemetrySystemWatts
+        case .system: return snapshot.systemWatts
         case .adapter: return snapshot.adapterWatts
         case .batteryDischarge: return snapshot.batteryWatts.map { max(0, -$0) }
         case .batteryCharge: return snapshot.batteryWatts.map { max(0, $0) }
@@ -189,11 +176,9 @@ final class PowerModel: ObservableObject {
 
     func source(_ metric: MetricID) -> String {
         switch metric {
-        case .system:
-            if latest?.smcSystemWatts != nil { return "AppleSMC · PSTR" }
-            return value(.system) == nil ? "整机功率暂不可用" : "电池遥测 · SystemLoad（备用）"
-        case .adapter: return "电源遥测 · SystemPowerIn"
-        case .batteryDischarge, .batteryCharge: return "电源遥测 · BatteryPower"
+        case .system: return "AppleSMC · PSTR"
+        case .adapter: return "AppleSMC · PDTR"
+        case .batteryDischarge, .batteryCharge: return "AppleSMC · B0AP（有符号电池功率）"
         default: return latest?.sensorReadings.first { $0.key == metric.rawValue }?.source ?? "此设备未提供可用的独立读数"
         }
     }
@@ -218,7 +203,7 @@ final class PowerModel: ObservableObject {
         pending = true
         let generation = readingGeneration
         queue.async { [weak self, sensors] in
-            let snapshot = sensors.read()
+            let snapshot = sensors.read(generation: generation)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.pending = false
@@ -232,24 +217,8 @@ final class PowerModel: ObservableObject {
         let now = snapshot.timestamp
         latest = snapshot
         lastUpdated = now
-        let fingerprint = "\(snapshot.telemetrySystemWatts ?? -1)|\(snapshot.adapterWatts ?? -1)|\(snapshot.batteryWatts ?? -1)"
-        if let counter = snapshot.firmwareCounter {
-            if lastCounter != counter { firmwareUpdated = now }
-            lastCounter = counter
-        } else if lastFingerprint != fingerprint || firmwareUpdated == nil {
-            firmwareUpdated = now
-        }
-        lastFingerprint = fingerprint
-        let stale = batteryTelemetryIsStale
-        let systemWatts = value(.system)
-        if systemWatts == nil {
-            statusText = "整机遥测暂不可用"
-        } else if stale {
-            statusText = "整机实时监测中 · 电池遥测暂未更新"
-        } else {
-            statusText = "实时监测中"
-        }
-        ledger.ingest(time: now, system: systemWatts, adapter: value(.adapter), battery: stale ? nil : snapshot.batteryWatts)
+        statusText = snapshot.systemWatts == nil ? "整机遥测暂不可用" : "实时监测中"
+        ledger.ingest(time: now, system: snapshot.systemWatts, adapter: snapshot.adapterWatts, battery: snapshot.batteryWatts)
         totals = ledger.totals
         var values: [String: Double] = [:]
         for metric in MetricID.allCases {
@@ -270,7 +239,7 @@ final class PowerModel: ObservableObject {
             Task { @MainActor in self?.refreshNow() }
         }
         samplingTimer.fireDate = Date().addingTimeInterval(refreshInterval)
-        samplingTimer.tolerance = min(1, refreshInterval * 0.05)
+        samplingTimer.tolerance = 0.05
         RunLoop.main.add(samplingTimer, forMode: .common)
         timer = samplingTimer
     }
@@ -291,7 +260,6 @@ final class PowerModel: ObservableObject {
         readingGeneration += 1
         ledger.breakContinuity()
         history.append(PowerPoint(time: Date(), values: [:]))
-        if !asleep { firmwareUpdated = nil; lastCounter = nil }
         restartTimer()
         persist()
         if !asleep { refreshNow() }
@@ -305,7 +273,7 @@ final class PowerModel: ObservableObject {
 
     func persist() {
         guard !loading else { return }
-        let saved = SavedState(totals: totals, history: history, visibleMetrics: visibleMetrics, chartMetrics: chartMetrics, samplingIntervalSeconds: refreshInterval, chartWindow: chartWindow, showEnergy: showEnergy, showChart: showChart, showFlow: showFlow, menuMetric: menuMetric)
+        let saved = SavedState(totals: totals, history: history, visibleMetrics: visibleMetrics, chartMetrics: chartMetrics, chartWindow: chartWindow, showEnergy: showEnergy, showChart: showChart, showFlow: showFlow, menuMetric: menuMetric)
         do {
             try FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(saved).write(to: stateURL, options: .atomic)

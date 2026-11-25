@@ -11,8 +11,7 @@ struct SensorReading: Sendable {
 
 struct NativeSnapshot: Sendable {
     var timestamp: Date
-    var smcSystemWatts: Double?
-    var telemetrySystemWatts: Double?
+    var systemWatts: Double?
     var adapterWatts: Double?
     /// Positive means charging; negative means discharging.
     var batteryWatts: Double?
@@ -21,8 +20,6 @@ struct NativeSnapshot: Sendable {
     var isCharging: Bool
     var sensorReadings: [SensorReading]
     var notes: [String]
-    /// Firmware update counter, NOT an energy counter. Used only for freshness.
-    var firmwareCounter: UInt64?
 }
 
 /// All hardware calls are read-only, in-process, and need no root/helper process.
@@ -32,37 +29,27 @@ final class NativeSensors: @unchecked Sendable {
     private let smc = ReadOnlySMC()
     private let energy = EnergyModelReader()
 
-    func read() -> NativeSnapshot {
+    private var lastGeneration: Int?
+
+    func read(generation: Int) -> NativeSnapshot {
         lock.lock()
         defer { lock.unlock() }
         let now = Date()
         let battery = batteryProperties()
-        let telemetry = battery?["PowerTelemetryData"] as? [String: Any]
         let external = (battery?["ExternalConnected"] as? NSNumber)?.boolValue ?? false
         let charging = (battery?["IsCharging"] as? NSNumber)?.boolValue ?? false
-        let telemetrySystem = milliwatts(telemetry?["SystemLoad"])
-        let smcSystem = smc?.power("PSTR").flatMap { $0 > 0 ? $0 : nil }
-        let adapter = milliwatts(telemetry?["SystemPowerIn"])
-        var batteryPower = milliwatts(telemetry?["BatteryPower"], signed: true)
+        let system = smc?.power("PSTR").flatMap { $0 > 0 ? $0 : nil }
+        let adapter = smc?.power("PDTR")
+        let batteryPower = smc?.batteryPower()
         var notes = [String]()
-        if battery == nil { notes.append("未能读取 AppleSmartBattery；此设备可能没有电池或不开放此接口。") }
-        if smcSystem == nil && telemetrySystem == nil { notes.append("当前未取得有效的整机功率读数。") }
-        if batteryPower == nil, let voltage = number(battery?["Voltage"]),
-           let current = signedNumber(battery?["InstantAmperage"] ?? battery?["Amperage"]),
-           voltage > 0, voltage < 100_000 {
-            let value = voltage * current / 1_000_000
-            if value.isFinite, abs(value) < 1_000 { batteryPower = value }
-        }
+        if battery == nil { notes.append("当前无法读取电量与外接电源状态。") }
+        if system == nil { notes.append("当前未取得有效的整机功率读数。") }
         var percent: Double?
         if let current = number(battery?["CurrentCapacity"]), let maximum = number(battery?["MaxCapacity"]), maximum > 0 {
             let value = current / maximum * 100
             if value.isFinite, (0...100).contains(value) { percent = value }
         }
         var readings = [SensorReading]()
-        if let value = smc?.power("PDTR") {
-            readings.append(SensorReading(key: "smc_adapter", name: "输入 SMC 传感器", watts: value,
-                                          source: "AppleSMC PDTR · W；Mac 侧直流输入，非插座功率"))
-        }
         // PDBR/PBwo are backlight-related rails, not all display electronics.
         if let value = smc?.power("PDBR") {
             readings.append(SensorReading(key: "display", name: "背光通道 · 不代表完整屏幕功率", watts: value,
@@ -83,18 +70,18 @@ final class NativeSensors: @unchecked Sendable {
                                           source: "AppleSMC PHPS · 原始功率通道，未验证组件归属；不参与合计"))
         }
         if let energy {
-            let result = energy.read()
+            let result = energy.read(startNewInterval: lastGeneration != generation)
+            lastGeneration = generation
             readings.append(contentsOf: result.readings.filter { $0.key != "chip" || !readings.contains(where: { $0.key == "chip" }) })
             notes.append(contentsOf: result.notes)
         } else {
             notes.append("IOReport 能量接口不可用；CPU、GPU、ANE 分项不会伪装为零。")
         }
         if smc == nil { notes.append("SMC 只读连接不可用，未提供背光及其他 SMC 读数。") }
-        return NativeSnapshot(timestamp: now, smcSystemWatts: smcSystem, telemetrySystemWatts: telemetrySystem, adapterWatts: adapter,
+        return NativeSnapshot(timestamp: now, systemWatts: system, adapterWatts: adapter,
                               batteryWatts: batteryPower, batteryPercent: percent,
                               externalConnected: external, isCharging: charging,
-                              sensorReadings: readings, notes: notes,
-                              firmwareCounter: (telemetry?["SystemLoadAccumulatorCount"] as? NSNumber)?.uint64Value)
+                              sensorReadings: readings, notes: notes)
     }
 
     private func batteryProperties() -> [String: Any]? {
@@ -108,17 +95,6 @@ final class NativeSensors: @unchecked Sendable {
     }
 
     private func number(_ value: Any?) -> Double? { (value as? NSNumber)?.doubleValue }
-    private func signedNumber(_ value: Any?) -> Double? {
-        guard let number = value as? NSNumber else { return nil }
-        // CF/NSNumber can expose negative 64-bit firmware values as unsigned.
-        return Double(Int64(bitPattern: number.uint64Value))
-    }
-    private func milliwatts(_ value: Any?, signed: Bool = false) -> Double? {
-        guard let raw = signed ? signedNumber(value) : number(value) else { return nil }
-        let watts = raw / 1_000
-        guard watts.isFinite, abs(watts) < 1_000, signed || watts >= 0 else { return nil }
-        return watts
-    }
 }
 
 /// AppleSMC's 80-byte user-client ABI. Only operations 9 (key info) and 5 (read)
@@ -138,7 +114,7 @@ private final class ReadOnlySMC {
     }
     deinit { if connection != 0 { IOServiceClose(connection) } }
 
-    func power(_ key: String) -> Double? {
+    private func read(_ key: String) -> (type: String, size: UInt32, response: [UInt8])? {
         guard key.utf8.count == 4, !unavailable.contains(key) else { return nil }
         var request = [UInt8](repeating: 0, count: 80)
         put(key.utf8.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }, into: &request, at: 0)
@@ -155,6 +131,19 @@ private final class ReadOnlySMC {
         put(metadata.size, into: &request, at: 28)
         request[42] = 5
         guard let response = call(request), response[40] == 0 else { return nil }
+        return (metadata.type, metadata.size, response)
+    }
+
+    // macsmc-power: B0AP is a signed, little-endian 32-bit value in milliwatts.
+    func batteryPower() -> Double? {
+        guard let data = read("B0AP"), data.type == "si32", data.size == 4 else { return nil }
+        let watts = Double(Int32(bitPattern: uint(data.response, at: 48))) / 1_000
+        return abs(watts) < 1_000 ? watts : nil
+    }
+
+    func power(_ key: String) -> Double? {
+        guard let metadata = read(key) else { return nil }
+        let response = metadata.response
         let value: Double
         if metadata.type == "flt ", metadata.size == 4 {
             value = Double(Float(bitPattern: uint(response, at: 48)))
@@ -244,7 +233,7 @@ private final class EnergyModelReader {
         // dlopen's one reference is bounded to this application's lifetime.
     }
 
-    func read() -> (readings: [SensorReading], notes: [String]) {
+    func read(startNewInterval: Bool) -> (readings: [SensorReading], notes: [String]) {
         guard let sample = samples(subscription, channels, nil)?.takeRetainedValue(),
               let items = (sample as NSDictionary)["IOReportChannels"] as? [NSDictionary]
         else { previous = [:]; previousTime = nil; return ([], ["IOReport 采样失败，分项功耗暂不可用。"]) }
@@ -260,7 +249,7 @@ private final class EnergyModelReader {
             current[name] = Counter(raw: raw, scale: scale, unit: unit)
         }
         defer { previous = current; previousTime = now }
-        guard let then = previousTime, now > then, now - then <= 60 else {
+        guard !startNewInterval, let then = previousTime, now > then, now - then <= 2 else {
             observedProgress.removeAll()
             return ([], ["分项功耗正在建立能量计数器基线。"])
         }

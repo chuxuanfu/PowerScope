@@ -50,11 +50,17 @@ private struct MenuContent: View {
                 Text("PowerScope")
                     .font(.headline)
                 Spacer(minLength: 4)
-                Text(model.statusText)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(statusTint)
-                    .multilineTextAlignment(.trailing)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(model.statusText)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(statusTint)
+                    if let time = model.lastUpdated {
+                        Text(time.formatted(date: .omitted, time: .standard))
+                            .font(.caption.monospacedDigit())
+                            .accessibilityLabel("采样时间 " + time.formatted(date: .omitted, time: .standard))
+                    }
+                }
+                .multilineTextAlignment(.trailing)
             }
 
             if model.visibleMetrics.contains(.system) {

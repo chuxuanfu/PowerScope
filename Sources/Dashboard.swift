@@ -141,7 +141,7 @@ struct DashboardView: View {
                         .frame(width: 6, height: 6)
                     Text(monitoringLabel)
                         .foregroundStyle(statusColor)
-                    Text("/  \(Int(model.refreshInterval)) 秒采样")
+                    Text("/  每秒采样")
                         .foregroundStyle(ScopeStyle.secondary)
                 }
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -282,10 +282,6 @@ struct DashboardView: View {
                 Text("最近读取 " + lastUpdated.formatted(date: .omitted, time: .standard))
             } else {
                 Text("等待首次读取")
-            }
-            if let age = model.firmwareAgeSeconds, age > 20 {
-                Text("·  电池遥测约 \(Int(age)) 秒前")
-                    .foregroundStyle(ScopeStyle.amber)
             }
         }
         .font(.system(size: 10, design: .monospaced))
@@ -792,35 +788,13 @@ private struct CustomizationSheet: View {
                         .overlay(RoundedRectangle(cornerRadius: 10).stroke(ScopeStyle.line, lineWidth: 1))
                     }
 
-                    settingsGroup("采样与菜单栏", caption: "更高的读取频率不会加快硬件传感器自身的更新") {
-                        HStack(spacing: 32) {
-                            VStack(alignment: .leading, spacing: 9) {
-                                Text("读取间隔")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(ScopeStyle.secondary)
-                                Picker("读取间隔", selection: $model.refreshInterval) {
-                                    ForEach(PowerModel.samplingIntervals, id: \.self) { seconds in
-                                        Text("\(Int(seconds)) 秒").tag(seconds)
-                                    }
-                                }
-                                .labelsHidden()
-                                .pickerStyle(.segmented)
+                    settingsGroup("菜单栏显示", caption: "所有功率指标每秒一起采样") {
+                        Picker("菜单栏显示", selection: $model.menuMetric) {
+                            ForEach(MetricID.allCases) { metric in
+                                Text(metric == .system ? "仅整机功率" : "整机 + \(metric.title)").tag(metric)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            VStack(alignment: .leading, spacing: 9) {
-                                Text("菜单栏显示")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(ScopeStyle.secondary)
-                                Picker("菜单栏显示", selection: $model.menuMetric) {
-                                    ForEach(MetricID.allCases) { metric in
-                                        Text(metric == .system ? "仅整机功率" : "整机 + \(metric.title)").tag(metric)
-                                    }
-                                }
-                                .labelsHidden()
-                                .frame(maxWidth: .infinity)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .labelsHidden()
                     }
                     Text("不可用的读数显示为「—」。不会通过整机减去芯片功率来推算屏幕功率，也不会用零代替缺失数据。")
                         .font(.system(size: 11))
